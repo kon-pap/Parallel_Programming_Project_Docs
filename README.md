@@ -29,5 +29,5 @@ the concept of 'tasks' in OpenMP. Whenever an executing thread encounters the di
 To ensure that overhead due to task creation does not impact the performance we limit
 the creation of tasks when the depth of the tree reaches 8. `#pragma omp task if(depth < 8)`
 ensures that no new tasks are created when the depth is more than 8. The number 8 was decided by 
-trail and error. Finally we used `#pragma omp simd reduction(+:dist)` to vectorize the `for` loop in the 
+trial and error. Finally we used `#pragma omp simd reduction(+:dist)` to vectorize the `for` loop in the 
 function `distance_squared(Point&, Point&)` to gain a better speedup.
