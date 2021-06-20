@@ -31,3 +31,14 @@ the creation of tasks when the depth of the tree reaches 8. `#pragma omp task if
 ensures that no new tasks are created when the depth is more than 8. The number 8 was decided by 
 trial and error. Finally we used `#pragma omp simd reduction(+:dist)` to vectorize the `for` loop in the 
 function `distance_squared(Point&, Point&)` to gain a better speedup.
+
+
+### MPI
+Our approach involves having one process work as a `main` process and rest of the 
+15 processes will be `worker` processes. `main` process is responsible for allocating work to each worker process
+and then printing the result. `main` process will first read the input `seed`, `dim` and `num_points`. These are then broadcasted to each of the worker process.
+Using the `num_points` and `size` the amount of work each `worker` can do is decided as the `chunk_size`.
+The main process then calculates the `start` and `end` pointer that defines the portion of data each `worker` can work on.
+Each worker receives these `start` and `end` pointers from the `main` process and then 
+builds a subtree of `points`. Each worker will find a local nearest neighbor for each query.
+`MPI_Reduce` is then used to find the nearnest neigbor with minimum distance across all workers for each query.
