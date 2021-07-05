@@ -5,11 +5,15 @@
 #include <random>
 #include <math.h>
 #include <mpi.h>
-
+#include <assert.h>
+#include <limits>
 #include "Utility.hpp"
 
 #define DEBUG 0
 
+/* rank: holds the rank of the process
+ * size: Tells us how many processes are running parallely*/
+int rank, size;
 
 /***************************************************************************************/
 float Point::distance_squared(Point &a, Point &b){
@@ -22,7 +26,6 @@ float Point::distance_squared(Point &a, Point &b){
         float tmp = a.coordinates[i] - b.coordinates[i];
         dist += tmp * tmp;
     }
-
     return dist;
 }
 /***************************************************************************************/
@@ -133,127 +136,158 @@ Node* nearest(Node* root, Point* query, int depth, Node* best, float &best_dist)
 
 
 Node* nearest_neighbor(Node* root, Point* query){
-
     float best_dist = root->point->distance_squared(*query);
-
     return nearest(root, query, 0, root, best_dist);
 }
 
 
 /***************************************************************************************/
 int main(int argc, char **argv){
-    MPI_Init(&argc,&argv);
-    int size, rank, new_rank, new_size;
-    MPI_Status s;
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     int seed = 0;
     int dim = 0;
     int num_points = 0;
     int num_queries = 10;
-    float min_dists[10] = {0};
-    int qids[10] = {0};
-    MPI_Group world_group;
-    MPI_Comm_group(MPI_COMM_WORLD, &world_group);
-    MPI_Group new_group;
-    const int ranks[10] = {0,1,2,3,4,5,6,7,8,9};
-    MPI_Group_incl(world_group, 10, ranks, &new_group);
 
+    /*Initialize the MPI computation*/
+    MPI_Init(&argc, &argv);
 
+    /*Read the rank and size of the processes into rank and size variables*/
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    MPI_Comm used_comm;
-    MPI_Comm_create(MPI_COMM_WORLD, new_group,  &used_comm);
-    if(used_comm != MPI_COMM_NULL) {
-        MPI_Comm_size(used_comm, &new_size);
-        MPI_Comm_rank(used_comm, &new_rank);
+    /*Assumption is that we will have atleast 2 processes as this is not a sequential implementation*/
+    if(size < 2) {
+        std::cerr<<"There has to be atleast 2 processes as this is not a sequential implementation.";
+        exit(-1);
+    }
 
-        //MPI_Comm_split(MPI_COMM_WORLD, color, rank, &used_comm);
+    std::chrono::high_resolution_clock::time_point tick;
 
-        std::chrono::high_resolution_clock::time_point tick;
-        if (new_rank == 0) {
-
+    /* Our approach involves process with rank 0 acting as the main process and the rest of the 15 processes will be the worker processes
+     * If the rank of the process is 0(our main process), we read the seed, dim and num_points*/
+    if (rank == 0) {
 #if DEBUG
-            // for measuring your local runtime
-            tick = std::chrono::high_resolution_clock::now();
-            Utility::specify_problem(argc, argv, &seed, &dim, &num_points);
+        // for measuring your local runtime
+        tick = std::chrono::high_resolution_clock::now();
+        Utility::specify_problem(argc, argv, &seed, &dim, &num_points);
 
 #else
-
-            Utility::specify_problem(&seed, &dim, &num_points);
+        Utility::specify_problem(&seed, &dim, &num_points);
 
 #endif
-        }
-        //MPI_Scatter(queries, 1, MPI_INT, q, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(&seed, 1, MPI_INT, 0, used_comm);
-        MPI_Bcast(&dim, 1, MPI_INT, 0, used_comm);
-        MPI_Bcast(&num_points, 1, MPI_INT, 0, used_comm);
-        // last points are query
-        float *x = Utility::generate_problem(seed, dim, num_points + num_queries);
-        Point **points = (Point **) calloc(num_points, sizeof(Point *));
 
-        for (int n = 0; n < num_points; ++n) {
-            points[n] = new Point(dim, n + 1, x + n * dim);
+    }
+
+    /* As only the process with rank 0 has the seed, dim and num_points, we broadcast these to all other worker processes.
+     * These will be needed by other processes to geenerate the Points*/
+    MPI_Bcast(&seed, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&dim, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&num_points, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+
+    // last points are query
+    float* x = Utility::generate_problem(seed, dim, num_points + num_queries);
+
+    /*Variable to hold minimum distance for the query points*/
+    float global_min_dist = 0;
+
+
+
+    /* Define the functionality of the main process.
+     * Main process(rank 0) will send each worker process with the information on what each worker process needs to do.
+     * start and end define the portion of the data each worker process need to work on.
+     * After allocating the work to each worker, results are printed by the main process*/
+    if(rank == 0) {
+        int qid = -999;
+        float local_min_distance = std::numeric_limits<float>::max();
+        /* chunk_size defines the amount of work that each worker process needs to do.*/
+        int chunk_size = std::ceil(num_points / (size-1));
+        int start = 0;
+        int end = std::min(start + chunk_size, num_points);
+        for (int i = 1; i < size; i++) {
+            MPI_Send(&start, 1 , MPI_INT, i, 0, MPI_COMM_WORLD);
+            MPI_Send(&end, 1 , MPI_INT, i, 1, MPI_COMM_WORLD);
+            start = end;
+            end = start + chunk_size;
+        }
+        for (int q = 0; q < num_queries; q++) {
+            for (int i = 1; i < size; i++) {
+                MPI_Recv(&qid, 1 , MPI_INT, i, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+            }
+            MPI_Reduce(&local_min_distance, &global_min_dist, 1 , MPI_FLOAT, MPI_MIN, 0, MPI_COMM_WORLD);
+            Utility::print_result_line(qid, global_min_dist);
         }
 
+
+#if DEBUG
+        // for measuring your local runtime
+        auto tock = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed_time = tock - tick;
+        std::cout << "elapsed time " << elapsed_time.count() << " second" << std::endl;
+#endif
+
+        std::cout << "DONE" << std::endl;
+
+    }
+        /* Defines the functionality of each worker.
+         * Each worker process receives start and end from the main process. start and end decides what portion of data each worker can work on.
+         * Using this, each worker builds a subtree of points. For each query, each worker will find a local nearest neighbor and the minimum distance to that neighbor
+         * MPI_Reduce with MPI_MIN operator is used to find the minimum distance for each query across all workers.*/
+    else {
+        //code for process with other ranks
+        float local_min_distance = 0;
+        int start, end;
+        MPI_Recv(&start, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Recv(&end, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        int chunk_size = end - start;
+        Point** points = (Point**)calloc(chunk_size, sizeof(Point*));
+        int i = 0;
+        for(int n = start; n < end; ++n){
+            points[i] = new Point(dim, n + 1, x + n * dim);
+            i++;
+
+        }
+
+        assert(i == chunk_size);
         // build tree
-        Node *tree = build_tree(points, num_points);
-
+        Node* tree = build_tree(points, chunk_size);
         // for each query, find nearest neighbor
-        //for(int q = 0; q < num_queries; ++q){
-        float *x_query = x + (num_points + rank) * dim;
+        for(int q = 0; q < num_queries; ++q){
+            float* x_query = x + (num_points + q) * dim;
+            Point query(dim, num_points + q, x_query);
 
-        Point query(dim, num_points + rank, x_query);
+            Node* res = nearest_neighbor(tree, &query);
 
-        Node *res = nearest_neighbor(tree, &query);
-
-        // output min-distance (i.e. to query point)
-        float min_distance = query.distance(*res->point);
-        //Utility::print_result_line(query.ID, min_distance);
-
-
-        MPI_Gather(&min_distance, 1, MPI_FLOAT, min_dists, 1, MPI_FLOAT, 0, used_comm);
-        MPI_Gather(&query.ID, 1, MPI_INT, qids, 1, MPI_INT, 0, used_comm);
-
-
-        if (new_rank == 0) {
-            for (int i = 0; i<num_queries; i++)
-                Utility::print_result_line(qids[i], min_dists[i]);
+            // output min-distance (i.e. to query point)
+            local_min_distance = query.distance(*res->point);
+            MPI_Send(&query.ID, 1, MPI_INT, 0, 2, MPI_COMM_WORLD);
+            MPI_Reduce(&local_min_distance, &global_min_dist, 1 , MPI_FLOAT, MPI_MIN, 0, MPI_COMM_WORLD);
+            //Utility::print_result_line(query.ID, global_min_dist);
 
 #if DEBUG
             // in case you want to have further debug information about
-                // the query point and the nearest neighbor
-                // std::cout << "Query: " << query << std::endl;
-                // std::cout << "NN: " << *res->point << std::endl << std::endl;
+            // the query point and the nearest neighbor
+            // std::cout << "Query: " << query << std::endl;
+            // std::cout << "NN: " << *res->point << std::endl << std::endl;
 #endif
-            //}
-
-#if DEBUG
-            // for measuring your local runtime
-                auto tock = std::chrono::high_resolution_clock::now();
-                std::chrono::duration<double> elapsed_time = tock - tick;
-                std::cout << "elapsed time " << elapsed_time.count() << " second" << std::endl;
-#endif
-
-            std::cout << "DONE" << std::endl;
-
-
-
         }
 
-
-        // clean-up
         Utility::free_tree(tree);
 
-        for (int n = 0; n < num_points; ++n) {
+        for(int n = 0; n < chunk_size; ++n){
             delete points[n];
         }
-
         free(points);
-        free(x);
 
-        (void) argc;
-        (void) argv;
+
     }
+
+
+    free(x);
+
+    (void)argc;
+    (void)argv;
     MPI_Finalize();
     return 0;
 }
