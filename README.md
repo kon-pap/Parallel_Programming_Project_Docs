@@ -42,3 +42,10 @@ The main process then calculates the `start` and `end` pointer that defines the 
 Each worker receives these `start` and `end` pointers from the `main` process and then 
 builds a subtree of `points`. Each worker will find a local nearest neighbor for each query.
 `MPI_Reduce` is then used to find the nearnest neigbor with minimum distance across all workers for each query.
+
+
+### Hybrid
+Our approach focuses on combining the two previous approaches in an efficient way. Thus, after splitting the problem in smaller pieces like in the MPI approach we make sure that each MPI process uses a shared memory model (in our case OMP). That means that each MPI process creates the tree corresponding to its chunk using `#pragma omp task` and then tries to solve the problem for all the queries in parallel using `#pragma omp parallel for`. Finally, we keep on using `#pragma omp simd` to compute the loop inside distance_squared function and we finally reduce all the results coming from all the MPI processes
+
+### Bonus
+Our bonus approach uses the same approach used in the hybrid implementation. The only difference between them is the way we vectorize the for loop inside distance_squared function. In this case, we use C intrinsic functions instead of OMP SIMD. Worth mentioning is the fact that we don't use a remainder loop because the size of each point is 128, which is perfectly divided with 8. This slightly different vectorization approach seems to give us better results regarding the final speedup.
